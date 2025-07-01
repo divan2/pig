@@ -30,20 +30,19 @@ try:
             set_dac(bus1, ADDR_A2, 4095 - v)  # убывает
 
             # Шина 2: синхронная пила, но быстрее
-            set_dac(bus1, ADDR_B1, v)         # возрастает
-            set_dac(bus1, ADDR_B2, 4095 - v)
+            set_dac(bus2, ADDR_B1, v)         # возрастает
+            set_dac(bus2, ADDR_B2, 4095 - v)
 
             time.sleep(0.01)
 
-    while True:
         for v in range(0, 4096):
             # Шина 1: зеркальное управление
             set_dac(bus1, ADDR_A2, v)         # возрастает
             set_dac(bus1, ADDR_A1, 4095 - v)  # убывает
 
             # Шина 2: синхронная пила, но быстрее
-            set_dac(bus1, ADDR_B2, v)         # возрастает
-            set_dac(bus1, ADDR_B1, 4095 - v)
+            set_dac(bus2, ADDR_B2, v)         # возрастает
+            set_dac(bus2, ADDR_B1, 4095 - v)
 
             time.sleep(0.01)
 except KeyboardInterrupt:
