@@ -159,6 +159,7 @@ try:
                     set_dac(bus2, ADDR_B1, smoothed['right_brake'])
                     set_dac(bus2, ADDR_B2, smoothed['left_brake'])
 
+
                     # Выводим итоговые значения
                     control_text = (
                         f"R: gaz {smoothed['right_gas']:.0f}%, beak {smoothed['right_brake']:.0f}% | "
