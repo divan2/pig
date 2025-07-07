@@ -2,13 +2,15 @@ import cv2
 import numpy as np
 from smbus2 import SMBus
 import time
+import sys
+import select
 
 # Настройки камеры
-show_image = True  # Всегда показываем изображение, как в первом коде
+show_image = True  # Всегда показываем изображение
 
 # Начальные значения HSV (будут установлены при калибровке)
-lower_hsv = None
-upper_hsv = None
+lower_hsv = np.array([35, 40, 40])
+upper_hsv = np.array([85, 255, 255])
 calibrated = False
 
 # Настройки I2C
@@ -20,7 +22,7 @@ ADDR_B2 = 0x61  # Левый тормоз (шина 2)
 
 # Настройки управления
 DEADZONE = 0.1
-SMOOTHING_FACTOR = 0.2  # Коэффициент экспоненциального сглаживания
+SMOOTHING_FACTOR = 0.2
 
 # Инициализация I2C
 bus1 = SMBus(1)  # GPIO2/3 (шина 1)
@@ -111,9 +113,9 @@ if not cap.isOpened():
     exit()
 
 print("=== Инструкция ===")
-print("1. Наведите камеру на объект и нажмите 'c' для калибровки цвета")
+print("1. Наведите камеру на объект и введите '3' для калибровки цвета")
 print("2. Управление будет активно только после калибровки")
-print("3. Нажмите 'q' для выхода")
+print("3. Нажмите 'q' в окне изображения для выхода")
 
 try:
     while True:
@@ -126,14 +128,14 @@ try:
         h, w, _ = frame.shape
         cx, cy = w // 2, h // 2
 
+        # Преобразуем в HSV
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
         # Отображаем статус калибровки
-        status_text = "Готов к калибровке (нажмите 'c')" if not calibrated else "Калибровка завершена"
-        cv2.putText(frame, status_text, (100, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        status_text = "Готов к калибровке (введите '3')" if not calibrated else "Калибровка завершена"
+        cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         if calibrated:
-            # Преобразуем в HSV
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
             # Маска по текущим границам HSV
             mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
 
@@ -143,7 +145,7 @@ try:
             found = False
             for contour in contours:
                 x, y, rw, rh = cv2.boundingRect(contour)
-                if rw >= 10 and rh >= 10:  # Минимальный размер объекта
+                if rw >= 10 and rh >= 10:
                     # Нормализуем координаты
                     nx, ny = normalize_coordinates(x + rw / 2, y + rh / 2, w, h)
 
@@ -152,10 +154,10 @@ try:
                     smoothed = apply_smoothing(controls)
 
                     # Управляем ЦАП
-                    set_dac(bus1, ADDR_A1, smoothed['right_gas'])  # Правый газ
-                    set_dac(bus1, ADDR_A2, smoothed['left_gas'])  # Левый газ
-                    set_dac(bus2, ADDR_B1, smoothed['right_brake'])  # Правый тормоз
-                    set_dac(bus2, ADDR_B2, smoothed['left_brake'])  # Левый тормоз
+                    set_dac(bus1, ADDR_A1, smoothed['right_gas'])
+                    set_dac(bus1, ADDR_A2, smoothed['left_gas'])
+                    set_dac(bus2, ADDR_B1, smoothed['right_brake'])
+                    set_dac(bus2, ADDR_B2, smoothed['left_brake'])
 
                     # Выводим итоговые значения
                     control_text = (
@@ -166,10 +168,9 @@ try:
                     cv2.putText(frame, control_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                     found = True
 
-                    if show_image:
-                        cv2.rectangle(frame, (x, y), (x + rw, y + rh), (0, 255, 0), 2)
-                        cv2.putText(frame, f"X: {nx:.2f}, Y: {ny:.2f}", (10, 90),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.rectangle(frame, (x, y), (x + rw, y + rh), (0, 255, 0), 2)
+                    cv2.putText(frame, f"X: {nx:.2f}, Y: {ny:.2f}", (10, 90),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     break
 
             if not found:
@@ -186,31 +187,37 @@ try:
         cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)
         cv2.imshow("Camera Tracking", frame)
 
-        # Обработка клавиш
+        # Проверка ввода с клавиатуры
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
-        elif key == ord('c'):
-            # Калибровка цвета
-            center_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)[cy, cx]
-            h_val, s_val, v_val = int(center_hsv[0]), int(center_hsv[1]), int(center_hsv[2])
-            print(f"🔧 Калибровка по цвету HSV: {center_hsv}")
 
-            delta_h, delta_s, delta_v = 10, 60, 60
-            lower_hsv = np.array([
-                max(0, h_val - delta_h),
-                max(0, s_val - delta_s),
-                max(0, v_val - delta_v)
-            ])
-            upper_hsv = np.array([
-                min(179, h_val + delta_h),
-                min(255, s_val + delta_s),
-                min(255, v_val + delta_v)
-            ])
-            print(f"🎯 Новый HSV диапазон:")
-            print(f"   Нижний: {lower_hsv}")
-            print(f"   Верхний: {upper_hsv}")
-            calibrated = True
+        # Проверка на ввод из терминала (калибровка)
+        if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+            cmd = input().strip()
+            if cmd == "3":
+                # Считываем HSV цвет по центру
+                center_hsv = hsv[cy, cx]
+                h_val, s_val, v_val = int(center_hsv[0]), int(center_hsv[1]), int(center_hsv[2])
+                print(f"🔧 Калибровка по цвету HSV: {center_hsv}")
+
+                # Устанавливаем диапазон с допуском
+                delta_h, delta_s, delta_v = 10, 60, 60
+                lower_hsv = np.array([
+                    max(0, h_val - delta_h),
+                    max(0, s_val - delta_s),
+                    max(0, v_val - delta_v)
+                ])
+                upper_hsv = np.array([
+                    min(179, h_val + delta_h),
+                    min(255, s_val + delta_s),
+                    min(255, v_val + delta_v)
+                ])
+
+                print(f"🎯 Новый HSV диапазон:")
+                print(f"   Нижний: {lower_hsv}")
+                print(f"   Верхний: {upper_hsv}")
+                calibrated = True
 
 except KeyboardInterrupt:
     print("\nЗавершено пользователем (Ctrl+C)")
