@@ -132,7 +132,7 @@ try:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
         # Отображаем статус калибровки
-        status_text = "Готов к калибровке (введите '3')" if not calibrated else "Калибровка завершена"
+        status_text = "gotov k kalibrovke" if not calibrated else "kalibrovka done"
         cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         if calibrated:
@@ -161,8 +161,8 @@ try:
 
                     # Выводим итоговые значения
                     control_text = (
-                        f"Правый: газ {smoothed['right_gas']:.0f}%, тормоз {smoothed['right_brake']:.0f}% | "
-                        f"Левый: газ {smoothed['left_gas']:.0f}%, тормоз {smoothed['left_brake']:.0f}%")
+                        f"R: gaz {smoothed['right_gas']:.0f}%, beak {smoothed['right_brake']:.0f}% | "
+                        f"L: gaz {smoothed['left_gas']:.0f}%, break {smoothed['left_brake']:.0f}%")
                     print(control_text)
 
                     cv2.putText(frame, control_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
