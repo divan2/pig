@@ -132,7 +132,7 @@ try:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
         # Отображаем статус калибровки
-        status_text = "Готов к калибровке (введите '3')" if not calibrated else "Калибровка завершена"
+        status_text = "gotov k kalibrovke" if not calibrated else "kalibrovka done"
         cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         if calibrated:
@@ -159,10 +159,11 @@ try:
                     set_dac(bus2, ADDR_B1, smoothed['right_brake'])
                     set_dac(bus2, ADDR_B2, smoothed['left_brake'])
 
+
                     # Выводим итоговые значения
                     control_text = (
-                        f"Правый: газ {smoothed['right_gas']:.0f}%, тормоз {smoothed['right_brake']:.0f}% | "
-                        f"Левый: газ {smoothed['left_gas']:.0f}%, тормоз {smoothed['left_brake']:.0f}%")
+                        f"R: gaz {smoothed['right_gas']:.0f}%, beak {smoothed['right_brake']:.0f}% | "
+                        f"L: gaz {smoothed['left_gas']:.0f}%, break {smoothed['left_brake']:.0f}%")
                     print(control_text)
 
                     cv2.putText(frame, control_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
@@ -201,7 +202,7 @@ try:
                 h_val, s_val, v_val = int(center_hsv[0]), int(center_hsv[1]), int(center_hsv[2])
                 print(f"🔧 Калибровка по цвету HSV: {center_hsv}")
 
-                # Устанавливаем диапазон с допуском
+                # Устанавливаем диапазон с допуском (как в исходном коде)
                 delta_h, delta_s, delta_v = 10, 60, 60
                 lower_hsv = np.array([
                     max(0, h_val - delta_h),
