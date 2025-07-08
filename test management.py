@@ -2,8 +2,6 @@ import cv2
 import numpy as np
 from smbus2 import SMBus
 import time
-import sys
-import select
 
 # Настройки камеры
 show_image = True
@@ -35,6 +33,10 @@ current_values = {
     'left_brake': 0
 }
 
+# Кнопка калибровки
+calib_button = {'x1': 20, 'y1': 400, 'x2': 200, 'y2': 450}
+button_pressed = False
+
 
 def set_dac(bus, addr, value):
     value = max(0, min(4095, int(value * 40.95)))
@@ -64,7 +66,7 @@ def calculate_controls(nx, ny):
         'left_brake': 0
     }
 
-    # Upravlenie po Y (gaz/tormoz)
+    # Upravlenie po Y
     if ny < -0.8:  # Maksimalnyi gaz
         gas = 100
         brake = 0
@@ -75,7 +77,7 @@ def calculate_controls(nx, ny):
         gas = max(0, min(100, 100 * (-ny)))
         brake = max(0, min(100, 100 * ny))
 
-        # Upravlenie po X (povoroty)
+        # Upravlenie po X
         if nx > 0.9:  # Povorot vpravo
             controls['left_gas'] = gas
             controls['right_brake'] = brake
@@ -99,13 +101,66 @@ def calculate_controls(nx, ny):
     return controls
 
 
+def draw_button(frame, pressed=False):
+    color = (0, 200, 0) if pressed else (0, 120, 0)
+    cv2.rectangle(frame,
+                  (calib_button['x1'], calib_button['y1']),
+                  (calib_button['x2'], calib_button['y2']),
+                  color, -1)
+    cv2.putText(frame, "KALIBROVKA",
+                (calib_button['x1'] + 10, calib_button['y1'] + 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+
+def check_button_click(x, y):
+    return (calib_button['x1'] <= x <= calib_button['x2'] and
+            calib_button['y1'] <= y <= calib_button['y2'])
+
+
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     print("Kamera ne obnaruzhena")
     exit()
 
+
+# Mouse callback function
+def mouse_callback(event, x, y, flags, param):
+    global button_pressed, calibrated, lower_hsv, upper_hsv
+
+    if event == cv2.EVENT_LBUTTONDOWN:
+        if check_button_click(x, y):
+            button_pressed = True
+    elif event == cv2.EVENT_LBUTTONUP:
+        if button_pressed and check_button_click(x, y):
+            # Kalibrovka po tsentru
+            center_hsv = hsv[cy, cx]
+            h_val, s_val, v_val = int(center_hsv[0]), int(center_hsv[1]), int(center_hsv[2])
+            print(f"Kalibrovka po tsvetu HSV: {center_hsv}")
+
+            delta_h, delta_s, delta_v = 10, 60, 60
+            lower_hsv = np.array([
+                max(0, h_val - delta_h),
+                max(0, s_val - delta_s),
+                max(0, v_val - delta_v)
+            ])
+            upper_hsv = np.array([
+                min(179, h_val + delta_h),
+                min(255, s_val + delta_s),
+                min(255, v_val + delta_v)
+            ])
+
+            print(f"Novyi HSV diapazon:")
+            print(f"   Nizhnii: {lower_hsv}")
+            print(f"   Verhnii: {upper_hsv}")
+            calibrated = True
+        button_pressed = False
+
+
+cv2.namedWindow("Camera Tracking")
+cv2.setMouseCallback("Camera Tracking", mouse_callback)
+
 print("=== Instruktsiya ===")
-print("1. Navedite kameru na ob'ekt i vvedite '3' dlya kalibrovki cveta")
+print("1. Nazhmite knopku 'KALIBROVKA' na ekrane dlya kalibrovki")
 print("2. Upravlenie budet aktivno tol'ko posle kalibrovki")
 print("3. Nazhmite 'q' v okne izobrazheniya dlya vykhoda")
 
@@ -120,7 +175,10 @@ try:
         cx, cy = w // 2, h // 2
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        status_text = "Gotov k kalibrovke (vvedite '3')" if not calibrated else "Kalibrovka zavershena"
+        # Risuem knopku
+        draw_button(frame, button_pressed)
+
+        status_text = "Gotov k kalibrovke" if not calibrated else "Kalibrovka zavershena"
         cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         if calibrated:
@@ -168,30 +226,6 @@ try:
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
-
-        if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
-            cmd = input().strip()
-            if cmd == "3":
-                center_hsv = hsv[cy, cx]
-                h_val, s_val, v_val = int(center_hsv[0]), int(center_hsv[1]), int(center_hsv[2])
-                print(f"Kalibrovka po tsvetu HSV: {center_hsv}")
-
-                delta_h, delta_s, delta_v = 10, 60, 60
-                lower_hsv = np.array([
-                    max(0, h_val - delta_h),
-                    max(0, s_val - delta_s),
-                    max(0, v_val - delta_v)
-                ])
-                upper_hsv = np.array([
-                    min(179, h_val + delta_h),
-                    min(255, s_val + delta_s),
-                    min(255, v_val + delta_v)
-                ])
-
-                print(f"Novyi HSV diapazon:")
-                print(f"   Nizhnii: {lower_hsv}")
-                print(f"   Verhnii: {upper_hsv}")
-                calibrated = True
 
 except KeyboardInterrupt:
     print("\nZaversheno pol'zovatelem (Ctrl+C)")
