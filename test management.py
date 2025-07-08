@@ -13,17 +13,17 @@ calibrated = False
 
 # Настройки I2C
 WRITE_DAC = 0x40
-ADDR_A1 = 0x60  # Pravyi gaz
-ADDR_A2 = 0x61  # Levyi gaz
-ADDR_B1 = 0x60  # Pravyi tormoz (shina 2)
-ADDR_B2 = 0x61  # Levyi tormoz (shina 2)
+ADDR_A1 = 0x60  # Правый газ
+ADDR_A2 = 0x61  # Левый газ
+ADDR_B1 = 0x60  # Правый тормоз
+ADDR_B2 = 0x61  # Левый тормоз
 
 # Настройки управления
 SMOOTHING_FACTOR = 0.2
 
 # Инициализация I2C
-bus1 = SMBus(1)  # GPIO2/3 (shina 1)
-bus2 = SMBus(14)  # GPIO23/24 (shina 2)
+bus1 = SMBus(1)  # Шина 1
+bus2 = SMBus(14)  # Шина 2
 
 # Текущие значения
 current_values = {
@@ -66,37 +66,56 @@ def calculate_controls(nx, ny):
         'left_brake': 0
     }
 
-    # Upravlenie po Y
-    if ny < -0.8:  # Maksimalnyi gaz
-        gas = 100
-        brake = 0
-    elif ny > 0.5:  # Maksimalnyi tormoz
-        gas = 0
-        brake = 100
-    else:  # Lineinoe upravlenie
-        gas = max(0, min(100, 100 * (-ny)))
-        brake = max(0, min(100, 100 * ny))
-
-        # Upravlenie po X
-        if nx > 0.9:  # Povorot vpravo
-            controls['left_gas'] = gas
-            controls['right_brake'] = brake
-        elif nx < -0.9:  # Povorot vlevo
+    # Управление по Y (газ/тормоз)
+    if ny < -0.8:  # Максимальный газ
+        controls['right_gas'] = 100
+        controls['left_gas'] = 100
+    elif ny > 0.5:  # Максимальный тормоз
+        controls['right_brake'] = 100
+        controls['left_brake'] = 100
+    else:  # Линейное управление между зонами
+        if ny < 0:  # Зона газа
+            gas = int(100 * min(1.0, -ny / 0.8))
             controls['right_gas'] = gas
+            controls['left_gas'] = gas
+        else:  # Зона тормоза
+            brake = int(100 * min(1.0, ny / 0.5))
+            controls['right_brake'] = brake
             controls['left_brake'] = brake
-        else:  # Lineinoe smeshenie
-            turn_factor = abs(nx) * gas if gas > 0 else abs(nx) * brake
 
-        if nx > 0:  # Vpravo
-            controls['left_gas'] = min(100, gas + turn_factor)
-            controls['right_gas'] = max(0, gas - turn_factor)
-            controls['right_brake'] = min(100, brake + turn_factor)
-            controls['left_brake'] = max(0, brake - turn_factor)
-        else:  # Vlevo
-            controls['right_gas'] = min(100, gas + turn_factor)
-            controls['left_gas'] = max(0, gas - turn_factor)
-            controls['left_brake'] = min(100, brake + turn_factor)
-            controls['right_brake'] = max(0, brake - turn_factor)
+    # Управление по X (повороты)
+    if nx > 0.9:  # Резкий поворот вправо
+        if ny < 0:  # Если в зоне газа
+            controls['left_gas'] = 100
+            controls['right_gas'] = 0
+        else:  # Если в зоне тормоза
+            controls['left_brake'] = 0
+            controls['right_brake'] = 100
+
+    elif nx < -0.9:  # Резкий поворот влево
+        if ny < 0:  # Если в зоне газа
+            controls['right_gas'] = 100
+            controls['left_gas'] = 0
+        else:  # Если в зоне тормоза
+            controls['right_brake'] = 0
+            controls['left_brake'] = 100
+
+    elif abs(nx) > 0.2:  # Плавный поворот
+        turn_factor = min(100, int(100 * abs(nx)))
+        if ny < 0:  # В зоне газа
+            if nx > 0:  # Вправо
+                controls['left_gas'] = min(100, controls['left_gas'] + turn_factor)
+                controls['right_gas'] = max(0, controls['right_gas'] - turn_factor)
+            else:  # Влево
+                controls['right_gas'] = min(100, controls['right_gas'] + turn_factor)
+                controls['left_gas'] = max(0, controls['left_gas'] - turn_factor)
+        else:  # В зоне тормоза
+            if nx > 0:  # Вправо
+                controls['right_brake'] = min(100, controls['right_brake'] + turn_factor)
+                controls['left_brake'] = max(0, controls['left_brake'] - turn_factor)
+            else:  # Влево
+                controls['left_brake'] = min(100, controls['left_brake'] + turn_factor)
+                controls['right_brake'] = max(0, controls['right_brake'] - turn_factor)
 
     return controls
 
@@ -119,11 +138,11 @@ def check_button_click(x, y):
 
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
-    print("Kamera ne obnaruzhena")
+    print("Camera not found")
     exit()
 
 
-# Mouse callback function
+# Функция обработки кликов мыши
 def mouse_callback(event, x, y, flags, param):
     global button_pressed, calibrated, lower_hsv, upper_hsv
 
@@ -132,10 +151,14 @@ def mouse_callback(event, x, y, flags, param):
             button_pressed = True
     elif event == cv2.EVENT_LBUTTONUP:
         if button_pressed and check_button_click(x, y):
-            # Kalibrovka po tsentru
-            center_hsv = hsv[cy, cx]
+            # Калибровка по центру кадра
+            _, frame = cap.read()
+            hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            h, w = frame.shape[:2]
+            center_hsv = hsv_frame[h // 2, w // 2]
+
             h_val, s_val, v_val = int(center_hsv[0]), int(center_hsv[1]), int(center_hsv[2])
-            print(f"Kalibrovka po tsvetu HSV: {center_hsv}")
+            print(f"Calibration HSV: {center_hsv}")
 
             delta_h, delta_s, delta_v = 10, 60, 60
             lower_hsv = np.array([
@@ -149,9 +172,9 @@ def mouse_callback(event, x, y, flags, param):
                 min(255, v_val + delta_v)
             ])
 
-            print(f"Novyi HSV diapazon:")
-            print(f"   Nizhnii: {lower_hsv}")
-            print(f"   Verhnii: {upper_hsv}")
+            print(f"New HSV range:")
+            print(f"  Lower: {lower_hsv}")
+            print(f"  Upper: {upper_hsv}")
             calibrated = True
         button_pressed = False
 
@@ -159,26 +182,26 @@ def mouse_callback(event, x, y, flags, param):
 cv2.namedWindow("Camera Tracking")
 cv2.setMouseCallback("Camera Tracking", mouse_callback)
 
-print("=== Instruktsiya ===")
-print("1. Nazhmite knopku 'KALIBROVKA' na ekrane dlya kalibrovki")
-print("2. Upravlenie budet aktivno tol'ko posle kalibrovki")
-print("3. Nazhmite 'q' v okne izobrazheniya dlya vykhoda")
+print("=== Instructions ===")
+print("1. Click 'KALIBROVKA' button to calibrate")
+print("2. Control will work after calibration")
+print("3. Press 'q' to quit")
 
 try:
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("Oshibka zakhvata kadra")
+            print("Frame capture error")
             break
 
-        h, w, _ = frame.shape
+        h, w = frame.shape[:2]
         cx, cy = w // 2, h // 2
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        # Risuem knopku
+        # Рисуем кнопку
         draw_button(frame, button_pressed)
 
-        status_text = "Gotov k kalibrovke" if not calibrated else "Kalibrovka zavershena"
+        status_text = "Ready for calibration" if not calibrated else "Calibration done"
         cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         if calibrated:
@@ -193,14 +216,14 @@ try:
                     controls = calculate_controls(nx, ny)
                     smoothed = apply_smoothing(controls)
 
+                    # Управление ЦАПами
                     set_dac(bus1, ADDR_A1, smoothed['right_gas'])
                     set_dac(bus1, ADDR_A2, smoothed['left_gas'])
                     set_dac(bus2, ADDR_B1, smoothed['right_brake'])
                     set_dac(bus2, ADDR_B2, smoothed['left_brake'])
 
-                    control_text = (
-                        f"Pravyi: gaz {smoothed['right_gas']:.0f}%, tormoz {smoothed['right_brake']:.0f}% | "
-                        f"Levyi: gaz {smoothed['left_gas']:.0f}%, tormoz {smoothed['left_brake']:.0f}%")
+                    control_text = (f"Right: gas {smoothed['right_gas']}%, brake {smoothed['right_brake']}% | "
+                                    f"Left: gas {smoothed['left_gas']}%, brake {smoothed['left_brake']}%")
                     print(control_text)
 
                     cv2.putText(frame, control_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
@@ -212,14 +235,16 @@ try:
                     break
 
             if not found:
+                # Обнуляем все выходы если объект не найден
                 controls = {'right_gas': 0, 'left_gas': 0, 'right_brake': 0, 'left_brake': 0}
                 smoothed = apply_smoothing(controls)
                 set_dac(bus1, ADDR_A1, 0)
                 set_dac(bus1, ADDR_A2, 0)
                 set_dac(bus2, ADDR_B1, 0)
                 set_dac(bus2, ADDR_B2, 0)
-                print("Ob'ekt ne naiden - vse vykhody 0%")
+                print("Object not found - all outputs 0%")
 
+        # Отображение центра и выходного изображения
         cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)
         cv2.imshow("Camera Tracking", frame)
 
@@ -228,8 +253,9 @@ try:
             break
 
 except KeyboardInterrupt:
-    print("\nZaversheno pol'zovatelem (Ctrl+C)")
+    print("\nStopped by user (Ctrl+C)")
 
+# Остановка всех выходов
 set_dac(bus1, ADDR_A1, 0)
 set_dac(bus1, ADDR_A2, 0)
 set_dac(bus2, ADDR_B1, 0)
