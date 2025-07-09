@@ -113,6 +113,12 @@ def calculate_controls(nx, ny):
             controls['right_brake'] = 100
             controls['left_brake'] = 0
 
+    # Логика: не должны быть одновременно активны газ и тормоза на одном колесе
+    if controls['right_gas'] > 0 and controls['right_brake'] > 0:
+        controls['right_gas'] = 0  # Отключаем газ, если тормоз активен
+    if controls['left_gas'] > 0 and controls['left_brake'] > 0:
+        controls['left_gas'] = 0  # Отключаем газ, если тормоз активен
+
     return controls
 
 
