@@ -67,55 +67,55 @@ def calculate_controls(nx, ny):
     }
 
     # Управление по Y (газ/тормоз)
-    if ny < -0.8:  # Максимальный газ
-        controls['right_gas'] = 100
-        controls['left_gas'] = 100
-    elif ny > 0.5:  # Максимальный тормоз
-        controls['right_brake'] = 100
-        controls['left_brake'] = 100
-    else:  # Линейное управление между зонами
-        if ny < 0:  # Зона газа
-            gas = int(100 * min(1.0, -ny / 0.8))
-            controls['right_gas'] = gas
-            controls['left_gas'] = gas
-        else:  # Зона тормоза
-            brake = int(100 * min(1.0, ny / 0.5))
-            controls['right_brake'] = brake
-            controls['left_brake'] = brake
+    if ny <= -0.3:  # Зона ускорения (y = [-0.3, 1])
+        # Интенсивность ускорения от 0 (при y = -0.3) до 100% (при y = 1)
+        acceleration = (ny + 0.3) / 1.3  # нормализация от 0 до 1
+        acceleration = max(0, min(1, acceleration))  # ограничение
+        gas_value = int(100 * acceleration)
+        controls['right_gas'] = gas_value
+        controls['left_gas'] = gas_value
 
-    # Управление по X (повороты)
-    if nx > 0.9:  # Резкий поворот вправо
-        if ny < 0:  # Если в зоне газа
-            controls['left_gas'] = 100
-            controls['right_gas'] = 0
-        else:  # Если в зоне тормоза
-            controls['left_brake'] = 0
-            controls['right_brake'] = 100
+        # Управление поворотом при ускорении
+        if nx < 0:  # Поворот влево
+            if -0.7 <= nx <= 0:
+                # Левый мотор уменьшается от максимума до 0
+                left_factor = (nx + 0.7) / 0.7
+                controls['left_gas'] = int(gas_value * left_factor)
+            elif nx < -0.7:
+                # Левый мотор тормозит от 0 до 25%
+                brake_factor = (-nx - 0.7) / 0.3
+                controls['left_brake'] = int(25 * brake_factor)
 
-    elif nx < -0.9:  # Резкий поворот влево
-        if ny < 0:  # Если в зоне газа
-            controls['right_gas'] = 100
-            controls['left_gas'] = 0
-        else:  # Если в зоне тормоза
-            controls['right_brake'] = 0
-            controls['left_brake'] = 100
+        elif nx > 0:  # Поворот вправо
+            if 0 <= nx <= 0.7:
+                # Правый мотор уменьшается от максимума до 0
+                right_factor = (0.7 - nx) / 0.7
+                controls['right_gas'] = int(gas_value * right_factor)
+            elif nx > 0.7:
+                # Правый мотор тормозит от 0 до 25%
+                brake_factor = (nx - 0.7) / 0.3
+                controls['right_brake'] = int(25 * brake_factor)
 
-    elif abs(nx) > 0.2:  # Плавный поворот
-        turn_factor = min(100, int(100 * abs(nx)))
-        if ny < 0:  # В зоне газа
-            if nx > 0:  # Вправо
-                controls['left_gas'] = min(100, controls['left_gas'] + turn_factor)
-                controls['right_gas'] = max(0, controls['right_gas'] - turn_factor)
-            else:  # Влево
-                controls['right_gas'] = min(100, controls['right_gas'] + turn_factor)
-                controls['left_gas'] = max(0, controls['left_gas'] - turn_factor)
-        else:  # В зоне тормоза
-            if nx > 0:  # Вправо
-                controls['right_brake'] = min(100, controls['right_brake'] + turn_factor)
-                controls['left_brake'] = max(0, controls['left_brake'] - turn_factor)
-            else:  # Влево
-                controls['left_brake'] = min(100, controls['left_brake'] + turn_factor)
-                controls['right_brake'] = max(0, controls['right_brake'] - turn_factor)
+    else:  # Зона торможения (y = [-1, -0.3])
+        # Интенсивность торможения от 0 (при y = -0.3) до 100% (при y = -1)
+        braking = (-ny - 0.3) / 0.7  # нормализация от 0 до 1
+        braking = max(0, min(1, braking))  # ограничение
+        brake_value = int(100 * braking)
+        controls['right_brake'] = brake_value
+        controls['left_brake'] = brake_value
+
+        # Управление поворотом при торможении
+        if nx < 0:  # Поворот влево
+            # Увеличиваем торможение левого мотора
+            turn_factor = min(1, -nx)  # от 0 до 1
+            additional_brake = int(100 * turn_factor)
+            controls['left_brake'] = min(100, brake_value + additional_brake)
+
+        elif nx > 0:  # Поворот вправо
+            # Увеличиваем торможение правого мотора
+            turn_factor = min(1, nx)  # от 0 до 1
+            additional_brake = int(100 * turn_factor)
+            controls['right_brake'] = min(100, brake_value + additional_brake)
 
     return controls
 
