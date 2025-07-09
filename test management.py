@@ -53,8 +53,16 @@ def apply_smoothing(new_values):
 
 
 def normalize_coordinates(x, y, width, height):
+    # Нормализация X: слева -1, справа 1
     nx = 2 * (x / width) - 1
-    ny = 1 - 2 * (y / height)
+
+    # Нормализация Y: сверху -1, снизу 1
+    ny = 2 * (y / height) - 1
+
+    # Ограничиваем значения в пределах [-1, 1]
+    nx = max(-1, min(1, nx))
+    ny = max(-1, min(1, ny))
+
     return nx, ny
 
 
@@ -67,9 +75,9 @@ def calculate_controls(nx, ny):
     }
 
     # Управление по Y (газ/тормоз)
-    if ny <= -0.3:  # Зона ускорения (y = [-0.3, 1])
-        # Интенсивность ускорения от 0 (при y = -0.3) до 100% (при y = 1)
-        acceleration = (ny + 0.3) / 1.3  # нормализация от 0 до 1
+    if ny <= -0.3:  # Зона ускорения (y = [-1, -0.3])
+        # Интенсивность ускорения от 0 (при y = -0.3) до 100% (при y = -1)
+        acceleration = (-ny - 0.3) / 0.7  # нормализация от 0 до 1
         acceleration = max(0, min(1, acceleration))  # ограничение
         gas_value = int(100 * acceleration)
         controls['right_gas'] = gas_value
@@ -96,9 +104,9 @@ def calculate_controls(nx, ny):
                 brake_factor = (nx - 0.7) / 0.3
                 controls['right_brake'] = int(25 * brake_factor)
 
-    else:  # Зона торможения (y = [-1, -0.3])
-        # Интенсивность торможения от 0 (при y = -0.3) до 100% (при y = -1)
-        braking = (-ny - 0.3) / 0.7  # нормализация от 0 до 1
+    else:  # Зона торможения (y = [-0.3, 1])
+        # Интенсивность торможения от 0 (при y = -0.3) до 100% (при y = 1)
+        braking = (ny + 0.3) / 1.3  # нормализация от 0 до 1
         braking = max(0, min(1, braking))  # ограничение
         brake_value = int(100 * braking)
         controls['right_brake'] = brake_value
@@ -118,7 +126,6 @@ def calculate_controls(nx, ny):
             controls['right_brake'] = min(100, brake_value + additional_brake)
 
     return controls
-
 
 def draw_button(frame, pressed=False):
     color = (0, 200, 0) if pressed else (0, 120, 0)
