@@ -2,11 +2,13 @@ import cv2
 import numpy as np
 from smbus2 import SMBus
 import time
+import sys
+import select
 
 # Настройки камеры
-show_image = True
+show_image = True  # Всегда показываем изображение
 
-# Начальные значения HSV
+# Начальные значения HSV (будут установлены при калибровке)
 lower_hsv = np.array([35, 40, 40])
 upper_hsv = np.array([85, 255, 255])
 calibrated = False
@@ -15,17 +17,18 @@ calibrated = False
 WRITE_DAC = 0x40
 ADDR_A1 = 0x60  # Правый газ
 ADDR_A2 = 0x61  # Левый газ
-ADDR_B1 = 0x60  # Правый тормоз
-ADDR_B2 = 0x61  # Левый тормоз
+ADDR_B1 = 0x60  # Правый тормоз (шина 2)
+ADDR_B2 = 0x61  # Левый тормоз (шина 2)
 
 # Настройки управления
+DEADZONE = 0.1
 SMOOTHING_FACTOR = 0.2
 
 # Инициализация I2C
-bus1 = SMBus(1)  # Шина 1
-bus2 = SMBus(14)  # Шина 2
+bus1 = SMBus(1)  # GPIO2/3 (шина 1)
+bus2 = SMBus(14)  # GPIO23/24 (шина 2)
 
-# Текущие значения
+# Текущие значения для сглаживания
 current_values = {
     'right_gas': 0,
     'left_gas': 0,
@@ -33,19 +36,17 @@ current_values = {
     'left_brake': 0
 }
 
-# Кнопка калибровки
-calib_button = {'x1': 20, 'y1': 400, 'x2': 200, 'y2': 450}
-button_pressed = False
-
 
 def set_dac(bus, addr, value):
-    value = max(0, min(4095, int(value * 40.95)))
+    """Установить значение (0..4095) на MCP4725"""
+    value = max(0, min(4095, int(value * 40.95)))  # Конвертация % в 12-битное значение
     high = (value >> 4) & 0xFF
     low = (value << 4) & 0xFF
     bus.write_i2c_block_data(addr, WRITE_DAC, [high, low])
 
 
 def apply_smoothing(new_values):
+    """Применяет экспоненциальное сглаживание к значениям"""
     for key in current_values:
         current_values[key] = (SMOOTHING_FACTOR * new_values[key] +
                                (1 - SMOOTHING_FACTOR) * current_values[key])
@@ -53,20 +54,14 @@ def apply_smoothing(new_values):
 
 
 def normalize_coordinates(x, y, width, height):
-    # Нормализация X: слева -1, справа 1
+    """Нормализует координаты в диапазон [-1, 1]"""
     nx = 2 * (x / width) - 1
-
-    # Нормализация Y: сверху -1, снизу 1
-    ny = 2 * (y / height) - 1
-
-    # Ограничиваем значения в пределах [-1, 1]
-    nx = max(-1, min(1, nx))
-    ny = max(-1, min(1, ny))
-
+    ny = 1 - 2 * (y / height)  # Инвертируем ось Y
     return nx, ny
 
 
 def calculate_controls(nx, ny):
+    """Вычисляет сигналы газа и тормоза для танкового управления"""
     controls = {
         'right_gas': 0,
         'left_gas': 0,
@@ -74,158 +69,111 @@ def calculate_controls(nx, ny):
         'left_brake': 0
     }
 
-    # Управление по Y (газ/тормоз)
-    if ny < -0.8:  # Максимальный тормоз
-        controls['right_brake'] = 100
-        controls['left_brake'] = 100
-    elif ny > 0.5:  # Максимальный газ
-        controls['right_gas'] = 100
-        controls['left_gas'] = 100
-    else:  # Линейное управление между зонами
-        if ny < 0:  # Зона газа
-            gas = int(100 * min(1.0, -ny / 0.8))
-            controls['right_gas'] = gas
-            controls['left_gas'] = gas
-        else:  # Зона тормоза
-            brake = int(100 * min(1.0, ny / 0.5))
-            controls['right_brake'] = brake
-            controls['left_brake'] = brake
+    # Границы
+    ACC_Y_THRESHOLD = -0.3
+    BRAKE_Y_THRESHOLD = -0.3
+    TURN_X_BORDER = 0.7
+    MAX_BRAKE_TURN = 25  # макс. тормоз при резком повороте
 
-    # Управление по X (повороты)
-    if ny >= -0.3:  # Только если зона ускорения (y >= -0.3)
-        if nx < -0.7:  # Левый мотор тормозит
-            controls['right_gas'] = 100
-            controls['left_brake'] = 25 + (1 - nx) * 75  # Левый мотор тормозит с увеличением интенсивности
-        elif nx > 0.7:  # Правый мотор тормозит
-            controls['left_gas'] = 100
-            controls['right_brake'] = 25 + (nx - 0.7) * 75  # Правый мотор тормозит с увеличением интенсивности
-        elif nx < 0:  # Левый мотор ускоряется
-            controls['left_gas'] = int(100 * max(0, -nx / 0.7))
-            controls['right_gas'] = controls['right_gas']  # Правый газ не изменяется
-        elif nx > 0:  # Правый мотор ускоряется
-            controls['right_gas'] = int(100 * max(0, nx / 0.7))
-            controls['left_gas'] = controls['left_gas']  # Левый газ не изменяется
-    else:  # Если торможение, то просто увеличиваем интенсивность торможения на сторону поворота
-        if nx < 0:  # Поворот влево
-            controls['left_brake'] = 100
-            controls['right_brake'] = 0
-        elif nx > 0:  # Поворот вправо
-            controls['right_brake'] = 100
-            controls['left_brake'] = 0
+    # Ускорение
+    if ny >= ACC_Y_THRESHOLD:
+        # Сила газа по прямой
+        base_gas = (ny - ACC_Y_THRESHOLD) / (1 - ACC_Y_THRESHOLD) * 100
 
-    # Логика: не должны быть одновременно активны газ и тормоза на одном колесе
-    if controls['right_gas'] > 0 and controls['right_brake'] > 0:
-        controls['right_gas'] = 0  # Отключаем газ, если тормоз активен
-    if controls['left_gas'] > 0 and controls['left_brake'] > 0:
-        controls['left_gas'] = 0  # Отключаем газ, если тормоз активен
+        # Коррекция поворота
+        if -TURN_X_BORDER < nx < TURN_X_BORDER:
+            # Умеренный поворот — уменьшаем газ на внутреннем колесе
+            correction = abs(nx) / TURN_X_BORDER  # [0, 1]
+            if nx < 0:
+                controls['left_gas'] = base_gas * (1 - correction)
+                controls['right_gas'] = base_gas
+            else:
+                controls['right_gas'] = base_gas * (1 - correction)
+                controls['left_gas'] = base_gas
+        else:
+            # Резкий поворот — тормозим внутреннее колесо
+            if nx < 0:
+                controls['right_gas'] = base_gas
+                controls['left_brake'] = (abs(nx) - TURN_X_BORDER) / (1 - TURN_X_BORDER) * MAX_BRAKE_TURN
+            else:
+                controls['left_gas'] = base_gas
+                controls['right_brake'] = (abs(nx) - TURN_X_BORDER) / (1 - TURN_X_BORDER) * MAX_BRAKE_TURN
+
+    # Торможение
+    elif ny < BRAKE_Y_THRESHOLD:
+        base_brake = (abs(ny) - abs(BRAKE_Y_THRESHOLD)) / (1 - abs(BRAKE_Y_THRESHOLD)) * 100
+
+        controls['left_brake'] = base_brake
+        controls['right_brake'] = base_brake
+
+        if abs(nx) > DEADZONE:
+            # Усиливаем тормоз с одной стороны
+            extra = abs(nx) * 25
+            if nx > 0:
+                controls['left_brake'] = min(100, controls['left_brake'] + extra)
+            else:
+                controls['right_brake'] = min(100, controls['right_brake'] + extra)
 
     return controls
 
 
-def draw_button(frame, pressed=False):
-    color = (0, 200, 0) if pressed else (0, 120, 0)
-    cv2.rectangle(frame,
-                  (calib_button['x1'], calib_button['y1']),
-                  (calib_button['x2'], calib_button['y2']),
-                  color, -1)
-    cv2.putText(frame, "KALIBROVKA",
-                (calib_button['x1'] + 10, calib_button['y1'] + 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-
-def check_button_click(x, y):
-    return (calib_button['x1'] <= x <= calib_button['x2'] and
-            calib_button['y1'] <= y <= calib_button['y2'])
-
-
+# Основной цикл
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
-    print("Camera not found")
+    print("Камера не обнаружена")
     exit()
 
-
-# Функция обработки кликов мыши
-def mouse_callback(event, x, y, flags, param):
-    global button_pressed, calibrated, lower_hsv, upper_hsv
-
-    if event == cv2.EVENT_LBUTTONDOWN:
-        if check_button_click(x, y):
-            button_pressed = True
-    elif event == cv2.EVENT_LBUTTONUP:
-        if button_pressed and check_button_click(x, y):
-            # Калибровка по центру кадра
-            _, frame = cap.read()
-            hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            h, w = frame.shape[:2]
-            center_hsv = hsv_frame[h // 2, w // 2]
-
-            h_val, s_val, v_val = int(center_hsv[0]), int(center_hsv[1]), int(center_hsv[2])
-            print(f"Calibration HSV: {center_hsv}")
-
-            delta_h, delta_s, delta_v = 10, 60, 60
-            lower_hsv = np.array([
-                max(0, h_val - delta_h),
-                max(0, s_val - delta_s),
-                max(0, v_val - delta_v)
-            ])
-            upper_hsv = np.array([
-                min(179, h_val + delta_h),
-                min(255, s_val + delta_s),
-                min(255, v_val + delta_v)
-            ])
-
-            print(f"New HSV range:")
-            print(f"  Lower: {lower_hsv}")
-            print(f"  Upper: {upper_hsv}")
-            calibrated = True
-        button_pressed = False
-
-
-cv2.namedWindow("Camera Tracking")
-cv2.setMouseCallback("Camera Tracking", mouse_callback)
-
-print("=== Instructions ===")
-print("1. Click 'KALIBROVKA' button to calibrate")
-print("2. Control will work after calibration")
-print("3. Press 'q' to quit")
+print("=== Инструкция ===")
+print("1. Наведите камеру на объект и введите '3' для калибровки цвета")
+print("2. Управление будет активно только после калибровки")
+print("3. Нажмите 'q' в окне изображения для выхода")
 
 try:
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("Frame capture error")
+            print("Ошибка захвата кадра")
             break
 
-        h, w = frame.shape[:2]
+        # Получаем размеры кадра
+        h, w, _ = frame.shape
         cx, cy = w // 2, h // 2
+
+        # Преобразуем в HSV
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        # Рисуем кнопку
-        draw_button(frame, button_pressed)
-
-        status_text = "Ready for calibration" if not calibrated else "Calibration done"
+        # Отображаем статус калибровки
+        status_text = "gotov k kalibrovke" if not calibrated else "kalibrovka done"
         cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         if calibrated:
+            # Маска по текущим границам HSV
             mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
+
+            # Поиск контуров
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             found = False
             for contour in contours:
                 x, y, rw, rh = cv2.boundingRect(contour)
                 if rw >= 10 and rh >= 10:
+                    # Нормализуем координаты
                     nx, ny = normalize_coordinates(x + rw / 2, y + rh / 2, w, h)
+
+                    # Вычисляем управляющие сигналы
                     controls = calculate_controls(nx, ny)
                     smoothed = apply_smoothing(controls)
 
-                    # Управление ЦАПами
+                    # Управляем ЦАП
                     set_dac(bus1, ADDR_A1, smoothed['right_gas'])
                     set_dac(bus1, ADDR_A2, smoothed['left_gas'])
                     set_dac(bus2, ADDR_B1, smoothed['right_brake'])
                     set_dac(bus2, ADDR_B2, smoothed['left_brake'])
 
-                    control_text = (f"Right: gas {smoothed['right_gas']}%, brake {smoothed['right_brake']}% | "
-                                    f"Left: gas {smoothed['left_gas']}%, brake {smoothed['left_brake']}%")
+                    # Выводим итоговые значения
+                    control_text = (
+                        f"R: gaz {smoothed['right_gas']:.0f}%, beak {smoothed['right_brake']:.0f}% | "
+                        f"L: gaz {smoothed['left_gas']:.0f}%, break {smoothed['left_brake']:.0f}%")
                     print(control_text)
 
                     cv2.putText(frame, control_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
@@ -237,25 +185,53 @@ try:
                     break
 
             if not found:
-                # Обнуляем все выходы если объект не найден
+                # Если объект не найден - останавливаем все
                 controls = {'right_gas': 0, 'left_gas': 0, 'right_brake': 0, 'left_brake': 0}
                 smoothed = apply_smoothing(controls)
                 set_dac(bus1, ADDR_A1, 0)
                 set_dac(bus1, ADDR_A2, 0)
                 set_dac(bus2, ADDR_B1, 0)
                 set_dac(bus2, ADDR_B2, 0)
-                print("Object not found - all outputs 0%")
+                print("Объект не найден - все выходы 0%")
 
-        # Отображение центра и выходного изображения
+        # Рисуем центр и отображаем изображение
         cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)
         cv2.imshow("Camera Tracking", frame)
 
+        # Проверка ввода с клавиатуры
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
 
+        # Проверка на ввод из терминала (калибровка)
+        if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+            cmd = input().strip()
+            if cmd == "3":
+                # Считываем HSV цвет по центру
+                center_hsv = hsv[cy, cx]
+                h_val, s_val, v_val = int(center_hsv[0]), int(center_hsv[1]), int(center_hsv[2])
+                print(f"🔧 Калибровка по цвету HSV: {center_hsv}")
+
+                # Устанавливаем диапазон с допуском (как в исходном коде)
+                delta_h, delta_s, delta_v = 10, 60, 60
+                lower_hsv = np.array([
+                    max(0, h_val - delta_h),
+                    max(0, s_val - delta_s),
+                    max(0, v_val - delta_v)
+                ])
+                upper_hsv = np.array([
+                    min(179, h_val + delta_h),
+                    min(255, s_val + delta_s),
+                    min(255, v_val + delta_v)
+                ])
+
+                print(f"🎯 Новый HSV диапазон:")
+                print(f"   Нижний: {lower_hsv}")
+                print(f"   Верхний: {upper_hsv}")
+                calibrated = True
+
 except KeyboardInterrupt:
-    print("\nStopped by user (Ctrl+C)")
+    print("\nЗавершено пользователем (Ctrl+C)")
 
 # Остановка всех выходов
 set_dac(bus1, ADDR_A1, 0)
